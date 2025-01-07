@@ -1,0 +1,1339 @@
+#clean environment
+rm(list = ls()) 
+
+#----load packages----
+
+library(StatsBombR)
+library(tidyverse)
+library(openxlsx)
+
+#----Scrapping----
+
+#pull all free competitions from Statsbomb
+free_comp <- (FreeCompetitions())
+
+#get all free prem matches from 2015/16 season
+prem_comp <- free_comp %>%
+  filter(competition_id == 2 & season_id == 27)
+matches_analysed <- FreeMatches(prem_comp)
+#get all event data
+uncleaned_data <- free_allevents(matches_analysed)
+match_event_data <- allclean(uncleaned_data)
+
+#----Playing Time----
+
+#Empty list to store the results
+lineups_list <- list()
+
+#Loop to get lineups for all needed matches
+for (i in 1:nrow(matches_analysed)) {lineups_list[[i]] <- get.lineupsFree(matches_analysed[i, ])}
+
+#Combine the lineup data from all matches into one df
+lineups <- as_tibble(do.call(rbind, lineups_list))
+
+#Remove the nests in the lineups df
+unnested_lineups <- lineups %>%
+  unnest(lineup) %>%
+  unnest(positions) %>%
+  select(match_id, team.name = team_name, team.id = team_id, player.name = player_name,
+         player.id = player_id, player.nickname = player_nickname, position,
+         position.id = position_id, from, to)
+
+#Create df containing nicknames of all players 
+player_nicknames <- unnested_lineups %>%
+  mutate(player.name = if_else(!is.na(player.nickname), player.nickname, player.name)) %>%
+  select(player.name, player.id) %>%
+  distinct()
+
+#Change player name to nickname for all relevant players for lineups df
+unnested_lineups <- unnested_lineups %>%
+  left_join(player_nicknames, by = "player.id") %>%
+  mutate(player.name = coalesce(player.name.y, player.name.x)) %>%
+  select(-player.name.x, -player.name.y)
+
+#Change player name to nickname for all relevant players for event df
+match_event_data <- match_event_data %>%
+  left_join(player_nicknames, by = "player.id") %>%
+  mutate(player.name = coalesce(player.name.y, player.name.x)) %>%
+  select(-player.name.x, -player.name.y) %>%
+  left_join(player_nicknames, by = c("pass.recipient.id" = "player.id")) %>%
+  mutate(pass.recipient.name = player.name.y) %>%
+  select(-player.name.y) %>%
+  rename(player.name = player.name.x)
+
+#Calculate minutes for event data for calculations
+match_event_data$time <- match_event_data$minute + match_event_data$second / 60
+
+#Calculate the extra time played in the first half of each game
+match_event_data <- match_event_data %>%
+  group_by(match_id) %>%
+  mutate(max_time_period_1 = max(ifelse(period == 1, time, NA), na.rm = TRUE)) %>%
+  mutate(adjustment = ifelse(period == 1, max_time_period_1 - 45, NA),
+         adjustment = max(adjustment, na.rm = TRUE)) %>%
+  ungroup()
+
+#Add the extra time to the second half events
+match_event_data <- match_event_data %>%
+  mutate(adjusted_time = ifelse(period == 2, time + adjustment, time)) %>%
+  select(-adjustment, -max_time_period_1)
+
+#Function to convert character time variable to numeric minutes
+convert_to_minutes <- function(time_variable) {
+  if (!is.na(time_variable) && grepl("^\\d{1,2}:\\d{2}$", time_variable)) {
+    parts <- as.numeric(unlist(strsplit(time_variable, ":")))
+    return(parts[1] + parts[2] / 60)}
+  return(NA)}
+
+#Use function on playing time df
+playing_time <- unnested_lineups %>%
+  mutate(from_minutes = sapply(from, convert_to_minutes),
+         to_minutes = sapply(to, convert_to_minutes))
+
+#Calculate time at full time for each game
+full_time <- match_event_data %>%
+  group_by(match_id) %>%
+  summarise(full_time = max(adjusted_time, na.rm = TRUE), .groups = 'drop')
+
+#If player gets to full time replace with that minute
+playing_time <- playing_time %>%
+  left_join(full_time, by = "match_id") %>%
+  mutate(to_minutes = ifelse(is.na(to_minutes), full_time, to_minutes)) %>%
+  select(-full_time, -from, -to)
+
+#Minutes each player played for each game
+playing_time_total <- playing_time %>%
+  group_by(player.name, player.id, match_id, team.name) %>%
+  summarise(from_minutes = min(from_minutes),
+            to_minutes = max(to_minutes)) %>%
+  mutate(total_minutes = to_minutes - from_minutes) %>%
+  ungroup()
+
+#----Minutes Played----
+
+#Minutes Played across all games
+minutes_played <- playing_time %>%
+  mutate(minutes_played_game = to_minutes - from_minutes) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(minutes_played = sum(minutes_played_game, na.rm = TRUE))
+
+#Matches Played
+matches_played <- playing_time %>%
+  distinct(player.name, player.id, team.name, match_id) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(matches_played = n())
+
+#Matches Started
+matches_started <- playing_time %>%
+  filter(from_minutes == 0) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(matches_started = n())
+
+#Substitute Appearances
+sub_apps <- playing_time %>%
+  group_by(match_id, player.id) %>%
+  filter(from_minutes != 0 & from_minutes != to_minutes & min(from_minutes) == from_minutes) %>%
+  ungroup() %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(sub_apps = n(), .groups = 'drop')
+
+#List of playing time dfs
+appearances_dfs <- list(minutes_played, matches_played, matches_started, sub_apps)
+
+#Merge dfs in the list
+appearances_stats <- reduce(appearances_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+appearances_stats[is.na(appearances_stats)] <- 0
+
+#----Positions----
+
+#Playing time by position for each match
+playing_time_by_position <- unnested_lineups %>%
+  mutate(from_minutes = sapply(from, convert_to_minutes),
+         to_minutes = sapply(to, convert_to_minutes)) %>%
+  left_join(full_time, by = "match_id") %>%
+  mutate(to_minutes = ifelse(is.na(to_minutes), full_time, to_minutes)) %>%
+  group_by(player.name, player.id, team.name, position, match_id) %>%
+  summarise(position_minutes = sum(to_minutes - from_minutes, na.rm = TRUE), .groups = "drop")
+
+#Calculate  minutes per player per position across all matches
+playing_time_match <- playing_time_by_position %>%
+  group_by(player.name, player.id, team.name, position) %>%
+  summarise(minutes_at = sum(position_minutes, na.rm = TRUE), .groups = "drop")
+
+#Calculate percentage of minutes per position across all matches
+percentage_minutes_position <- playing_time_match %>%
+  left_join(minutes_played, by = c("player.name", "player.id", "team.name")) %>%
+  mutate(percentage_minutes = (minutes_at / minutes_played) * 100)
+
+#Calculate the most played position
+most_played_position <- percentage_minutes_position %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(most_played_position = position[which.max(minutes_at)], .groups = "drop") %>%
+  mutate(position = most_played_position) %>%
+  left_join(unnested_lineups %>% select(position, position.id), by = "position", relationship = "many-to-many") %>%
+  select(-position) %>%
+  distinct()
+
+#Change to wide format
+minutes_played_positional <- percentage_minutes_position %>%
+  pivot_wider(names_from = position,
+              values_from = c(minutes_at, percentage_minutes),
+              names_sep = "_") %>%
+  left_join(most_played_position, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+minutes_played_positional[is.na(minutes_played_positional)] <- 0
+
+#Add minutes played column for later analysis
+most_played_position <- most_played_position %>%
+  left_join(minutes_played, by = c("player.name", "player.id", "team.name"))
+
+#----Passing Stats----
+
+#Passes Completed
+passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(passes_completed = n())
+
+#Passes Attempted
+passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(passes_attempted = n())
+
+#Filters event data for only progressive passes
+progressive_passes_data <- match_event_data %>%
+  filter(type.name == "Pass") %>%
+  mutate(start_distance_to_goal_line = 120 - location.x,
+         end_distance_to_goal_line = 120 - pass.end_location.x,
+         distance_moved_closer_to_goal_line = start_distance_to_goal_line - end_distance_to_goal_line,
+         percentage_moved_closer_to_goal_line = distance_moved_closer_to_goal_line / start_distance_to_goal_line) %>%
+  filter(location.x >= 48, #excludes passes starting in the defending 40% of the pitch
+         location.x < pass.end_location.x,
+         distance_moved_closer_to_goal_line >= 10,
+         percentage_moved_closer_to_goal_line >= 0.25) #excludes passes that move less than 25% closer to the goal line
+
+#Progressive Passes Completed
+progressive_passes_completed <- progressive_passes_data %>%
+  filter(is.na(pass.outcome.name))%>%  
+  group_by(player.name, player.id, team.name) %>%
+  summarise(progressive_passes_completed = n())
+
+#Progressive Passes Attempted
+progressive_passes_attempted <- progressive_passes_data %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(progressive_passes_attempted = n())
+
+#Total Distance Progressed with Passes
+distanced_progressed_passes <- progressive_passes_data %>%
+  filter(is.na(pass.outcome.name)) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(distanced_progressed_passes = sum(distance_moved_closer_to_goal_line, na.rm = TRUE), .groups = "drop")
+
+#Final 3rd Passes Completed
+final_3rd_passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  filter(location.x <= 80 & pass.end_location.x > 80) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(final_3rd_passes_completed = n())
+
+#Final 3rd Passes Attempted
+final_3rd_passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>%
+  filter(location.x <= 80 & pass.end_location.x > 80) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(final_3rd_passes_attempted = n())
+
+#Passes into the Penalty Box Completed
+penalty_box_passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  filter((location.x < 102 | location.y < 18 | location.y > 62) &  #starts outside the penalty box
+           pass.end_location.x >= 102 & pass.end_location.y >= 18 & pass.end_location.y <= 62) %>%  #ends inside the penalty box
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalty_box_passes_completed = n())
+
+#Passes into the Penalty Box Attempted
+penalty_box_passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>% 
+  filter((location.x < 102 | location.y < 18 | location.y > 62) &  #starts outside the penalty box
+           pass.end_location.x >= 102 & pass.end_location.y >= 18 & pass.end_location.y <= 62) %>%  #ends inside the penalty box
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalty_box_passes_attempted = n())
+
+#Assists
+assists <- match_event_data %>%
+  filter(type.name == "Pass" & pass.goal_assist == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(assists = n())
+
+#Expected Assisted Goals
+xGA = match_event_data %>%
+  filter(type.name == "Shot") %>%
+  select(shot.key_pass_id, xGA = shot.statsbomb_xg)
+shot_assists = left_join(match_event_data, xGA, by = c("id" = "shot.key_pass_id")) %>%
+  select(team.name, player.name, player.id, type.name, pass.shot_assist,pass.goal_assist, xGA ) %>%
+  filter(pass.shot_assist == TRUE | pass.goal_assist == TRUE)
+expected_assists <- shot_assists %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(xGA = sum(xGA, na.rm = TRUE))
+
+#Key Passes (Passes leading directly to a shot)
+key_passes <- match_event_data %>%
+  filter(pass.shot_assist == TRUE | pass.goal_assist == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(key_passes = n())
+
+#Short Passes Completed
+short_passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  filter(pass.length >= 5 & pass.length <= 15) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(short_passes_completed = n())
+
+#Short Passes Attempted
+short_passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>%
+  filter(pass.length >= 5 & pass.length <= 15) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(short_passes_attempted = n())
+
+#Medium Passes Completed
+medium_passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  filter(pass.length > 15 & pass.length <= 30) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(medium_passes_completed = n())
+
+#Medium Passes Attempted
+medium_passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>%
+  filter(pass.length > 15 & pass.length <= 30) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(medium_passes_attempted = n())
+
+#Long Passes Completed
+long_passes_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name)) %>% 
+  filter(pass.length > 30) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(long_passes_completed = n())
+
+#Long Passes Attempted
+long_passes_attempted <- match_event_data %>%
+  filter(type.name == "Pass") %>%
+  filter(pass.length > 30) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(long_passes_attempted = n())
+
+#Through Balls Completed
+through_balls_completed <- match_event_data %>%
+  filter(pass.technique.name == "Through Ball" & is.na(pass.outcome.name)) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(through_balls_completed = n())
+
+#Through Balls Attempted
+through_balls_attempted <- match_event_data %>%
+  filter(pass.technique.name == "Through Ball") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(through_balls_attempted = n())
+
+#Switches Completed
+switches_completed <- match_event_data %>%
+  filter(pass.switch == TRUE & is.na(pass.outcome.name)) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(switches_completed = n())
+
+#Switches Attempted
+switches_attempted <- match_event_data %>%
+  filter(pass.switch == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(switches_attempted = n())
+
+#Passes Under Pressure Completed
+passes_UP_completed <- match_event_data %>%
+  filter(type.name == "Pass" & is.na(pass.outcome.name) & under_pressure == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(passes_under_pressure_completed = n())
+
+#Passes Under Pressure Attempted
+passes_UP_attempted <- match_event_data %>%
+  filter(type.name == "Pass" & under_pressure == TRUE) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(passes_under_pressure_attempted = n())
+
+#Crosses Completed
+crosses_completed <- match_event_data %>%
+  filter(pass.cross == TRUE & is.na(pass.outcome.name)) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(crosses_completed = n())
+
+#Crosses Attempted
+crosses_attempted <- match_event_data %>%
+  filter(pass.cross == TRUE) %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(crosses_attempted = n(), .groups = "drop")
+
+#List of passing dfs 
+passing_dfs <- list(minutes_played, passes_completed, passes_attempted, progressive_passes_completed, 
+                    progressive_passes_attempted, distanced_progressed_passes, 
+                    final_3rd_passes_completed, final_3rd_passes_attempted, penalty_box_passes_completed, 
+                    penalty_box_passes_attempted, assists, expected_assists, key_passes, 
+                    short_passes_completed, short_passes_attempted, medium_passes_completed, 
+                    medium_passes_attempted, long_passes_completed, long_passes_attempted, 
+                    through_balls_completed, through_balls_attempted, switches_completed, 
+                    switches_attempted, passes_UP_completed, passes_UP_attempted, crosses_completed, 
+                    crosses_attempted)
+
+#Merge dfs in the list
+passing_stats <- reduce(passing_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+passing_stats[is.na(passing_stats)] <- 0
+
+#Calculate success rates of stats
+passing_stats <- passing_stats %>%
+  mutate(passes_completion_rate = ifelse(passes_attempted > 0, 
+                                         (passes_completed / passes_attempted) * 100, 0),
+         progressive_passes_completion_rate = ifelse(progressive_passes_attempted > 0, 
+                                                     (progressive_passes_completed / progressive_passes_attempted) * 100, 0),
+         final_3rd_passes_completion_rate = ifelse(final_3rd_passes_attempted > 0, 
+                                                   (final_3rd_passes_completed / final_3rd_passes_attempted) * 100, 0),
+         penalty_box_passes_completion_rate = ifelse(penalty_box_passes_attempted > 0, 
+                                                     (penalty_box_passes_completed / penalty_box_passes_attempted) * 100, 0),
+         crosses_completion_rate = ifelse(crosses_attempted > 0, 
+                                          (crosses_completed / crosses_attempted) * 100, 0),
+         switches_completion_rate = ifelse(switches_attempted > 0, 
+                                           (switches_completed / switches_attempted) * 100, 0),
+         through_balls_completion_rate = ifelse(through_balls_attempted > 0, 
+                                                (through_balls_completed / through_balls_attempted) * 100, 0),
+         passes_under_pressure_completion_rate = ifelse(passes_under_pressure_attempted > 0, 
+                                                        (passes_under_pressure_completed / passes_under_pressure_attempted) * 100, 0))
+
+#Function to calculate per 90 minute stats
+calculate_per90 <- function(data) {
+  #get columns to include
+  per90_columns <- setdiff(names(data), 
+                           c("player.name", "player.id", "team.name", "minutes_played", grep("rate$", names(data), value = TRUE)))
+  #divide data by minutes played and multiply by 90
+  data %>%
+    mutate(across(all_of(per90_columns), 
+                  ~ (. / .data[["minutes_played"]]) * 90, .names = "{.col}_per90"))
+}
+
+#Function to calculate team averages
+add_team_weighted_averages <- function(data) {
+  #Get columns that need to be averaged, excluding per 90 columns as it is done separately
+  numeric_columns <- names(data)[sapply(data, is.numeric)]
+  numeric_columns <- setdiff(numeric_columns, grep("_per90$", numeric_columns, value = TRUE))
+  
+  #Calculate  averages for each team
+  team_weighted <- data %>%
+    group_by(team.name) %>%
+    summarise(across(all_of(numeric_columns), 
+                     #multiply by minutes played of player and divide by minutes played of the team
+                     ~ sum(. * minutes_played) / sum(minutes_played), .names = "{.col}"), 
+              minutes_played = sum(minutes_played), .groups = "drop")
+  
+  #Calculate per 90 stats for team averages
+  team_weighted <- calculate_per90(team_weighted)
+  
+  #Assign player name and ID to represent team averages
+  team_averages <- team_weighted %>%
+    mutate(player.name = paste0(team.name, " Team Average"), player.id = NA    )
+  
+  #Ensure the same column order as the original df
+  all_columns <- names(data)
+  team_averages <- team_averages %>%
+    select(all_of(all_columns))
+  
+  #Add team average rows to the original df
+  bind_rows(data, team_averages)
+}
+
+#Use function to calculate per 90 stats
+passing_stats <- calculate_per90(passing_stats)
+
+#Use function to add team averages
+passing_stats <- add_team_weighted_averages(passing_stats)
+
+#----Defensive Stats----
+
+#50/50s completed
+`5050_completed` <- match_event_data %>%
+  filter(`50_50.outcome.name` == "Won" | `50_50.outcome.name` == "Success To Team") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(`5050_completed` = n())
+
+#50/50s attempted
+`5050_attempted` <- match_event_data %>%
+  filter(type.name == "50/50") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(`5050_attempted` = n())
+
+#Yellow Cards
+yellow_cards <- match_event_data %>%
+  filter(bad_behaviour.card.name == "Yellow Card" | bad_behaviour.card.name == "Second Yellow Card" |
+           foul_committed.card.name == "Yellow Card" | foul_committed.card.name == "Second Yellow Card" ) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(yellow_cards = n())
+
+#Red Cards
+red_cards <- match_event_data %>%
+  filter(bad_behaviour.card.name == "Red Card" | bad_behaviour.card.name == "Second Yellow Card" |
+           foul_committed.card.name == "Red Card" | foul_committed.card.name == "Second Yellow Card") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(red_cards = n())
+
+#Ball Recovery Attempted
+ball_recoveries_attempted <- match_event_data %>%
+  filter(type.name == "Ball Recovery") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(ball_recoveries_attempted = n())
+
+#Ball Recovery Completed
+ball_recoveries_completed <- match_event_data %>%
+  filter(type.name == "Ball Recovery" & is.na(ball_recovery.recovery_failure)) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(ball_recoveries_completed = n())
+
+#Blocks Completed
+blocks_completed <- match_event_data %>%
+  filter(type.name == "Block") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(blocks_completed = n())
+
+#Blocked Shot on Target
+blocks_SoT <- match_event_data %>%
+  filter(type.name == "Block" & block.save_block == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(blocks_SoT = n())
+
+#Clearances Completed
+clearances_completed <- match_event_data %>%
+  filter(type.name == "Clearance") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(clearances_completed = n())
+
+#Dribbled Past
+dribbled_past <- match_event_data %>%
+  filter(type.name == "Dribbled Past") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(dribbled_past = n())
+
+#Tackles Won
+tackles_won <- match_event_data %>%
+  filter(duel.type.name == "Tackle" & duel.outcome.name == "Won" | duel.outcome.name == "Success" |
+           duel.outcome.name == "Success In Play" | duel.outcome.name == "Success Out") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(tackles_won = n())
+
+#Tackles Attempted
+tackles_attempted <- match_event_data %>%
+  filter(duel.type.name == "Tackle") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(tackles_attempted = n())
+
+#Errors
+errors <- match_event_data %>%
+  filter(type.name == "Error") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(errors = n())
+
+#Fouls Committed
+fouls_committed <- match_event_data %>%
+  filter(type.name == "Foul Committed") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(fouls_committed = n())
+
+#Penalties Committed
+penalties_committed <- match_event_data %>%
+  filter(type.name == "Foul Committed" & foul_committed.penalty == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalties_committed = n())
+
+#Interceptions Attempted
+interceptions_attempted <- match_event_data %>%
+  filter(type.name == "Interception") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(interceptions_attempted = n())
+
+#Interceptions Completed
+interceptions_completed <- match_event_data %>%
+  filter(type.name == "Interception" & interception.outcome.name == "Won" | interception.outcome.name == "Success" |
+           interception.outcome.name == "Success In Play" | interception.outcome.name == "Success Out") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(interceptions_completed = n())
+
+#Own Goals Conceded
+own_goals_conceded <- match_event_data %>%
+  filter(type.name == "Own Goal Against") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(own_goals_conceded = n())
+
+#Pressures (Time)
+time_pressuring <- match_event_data %>%
+  filter(type.name == "Pressure") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(time_pressuring_seconds = sum(milliseconds, na.rm = TRUE) / 1000)
+
+#Possession won in defensive 3rd
+possesion_won_defensive_3rd <- match_event_data %>%
+  filter(interception.outcome.name == "Won" | #Interceptions
+           duel.type.name == "Tackle" & (duel.outcome.name == "Won" | duel.outcome.name == "Success") |
+           type.name == "Ball Recovery" & is.na(ball_recovery.recovery_failure)) %>%
+  filter(location.x <= 40) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(possesion_won_defensive_3rd = n())
+
+#Possession won in middle 3rd
+possesion_won_middle_3rd <- match_event_data %>%
+  filter(interception.outcome.name == "Won" | #Interceptions
+           duel.type.name == "Tackle" & (duel.outcome.name == "Won" | duel.outcome.name == "Success") |
+           type.name == "Ball Recovery" & is.na(ball_recovery.recovery_failure)) %>%
+  filter(location.x > 40 & location.x <= 80) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(possesion_won_middle_3rd = n())
+
+#Possession won in attacking 3rd
+possesion_won_attacking_3rd <- match_event_data %>%
+  filter(interception.outcome.name == "Won" | #Interceptions
+           duel.type.name == "Tackle" & (duel.outcome.name == "Won" | duel.outcome.name == "Success") |
+           type.name == "Ball Recovery" & is.na(ball_recovery.recovery_failure)) %>%
+  filter(location.x > 80) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(possesion_won_attacking_3rd = n(), .groups = "drop")
+
+#List of defensive dfs
+defensive_dfs <- list(minutes_played, `5050_completed`, `5050_attempted`, yellow_cards, red_cards, 
+                      ball_recoveries_attempted,ball_recoveries_completed, blocks_completed, 
+                      blocks_SoT, clearances_completed, dribbled_past, tackles_won, tackles_attempted, 
+                      errors, fouls_committed, penalties_committed, interceptions_attempted, 
+                      interceptions_completed, own_goals_conceded, time_pressuring, 
+                      possesion_won_defensive_3rd, possesion_won_middle_3rd, possesion_won_attacking_3rd)
+
+#Merge dfs in the list
+defensive_stats <- reduce(defensive_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+defensive_stats[is.na(defensive_stats)] <- 0
+
+#Calculate success rates of stats
+defensive_stats <- defensive_stats %>%
+  mutate(`5050_success_rate` = ifelse(`5050_attempted` > 0, (`5050_completed` / `5050_attempted`) * 100, 0),
+         ball_recovery_success_rate = ifelse(ball_recoveries_attempted > 0, (ball_recoveries_completed / ball_recoveries_attempted) * 100, 0),
+         interception_success_rate = ifelse(interceptions_attempted > 0, (interceptions_completed / interceptions_attempted) * 100, 0),
+         tackle_success_rate = ifelse(tackles_attempted > 0, (tackles_won / tackles_attempted) * 100, 0))
+
+#Use function to calculate per 90 stats
+defensive_stats <- calculate_per90(defensive_stats)
+
+#Use function to add team averages
+defensive_stats <- add_team_weighted_averages(defensive_stats)
+
+#----Dribbling Stats----
+
+#Carries 
+carries <- match_event_data %>%
+  filter(type.name == "Carry") %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(carries = n())
+
+#Get data for all progressive carries
+progressive_carries_data <- match_event_data %>%
+  filter(type.name == "Carry") %>% 
+  mutate(start_distance_to_goal_line = 120 - location.x,
+         end_distance_to_goal_line = 120 - carry.end_location.x,
+         distance_moved_closer_to_goal_line = start_distance_to_goal_line - end_distance_to_goal_line,
+         percentage_moved_closer_to_goal_line = distance_moved_closer_to_goal_line / start_distance_to_goal_line) %>%
+  filter(location.x >= 48, #excludes passes starting in the defending 40% of the pitch
+         location.x < carry.end_location.x,
+         distance_moved_closer_to_goal_line >= 10,
+         percentage_moved_closer_to_goal_line >= 0.25) #excludes passes that move less than 25% closer to the goal line
+
+#Progressive Carries
+progressive_carries <- progressive_carries_data %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(progressive_carries = n())
+
+#Total Distance Progressed with Carries
+distanced_progressed_carries <- progressive_carries_data %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(distanced_progressed_carries = sum(distance_moved_closer_to_goal_line, na.rm = TRUE))
+
+#Final 3rd Carries
+final_3rd_carries_attempted <- match_event_data %>%
+  filter(type.name == "Carry") %>%
+  filter(location.x <= 80 & carry.end_location.x > 80) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(final_3rd_carries_attempted = n())
+
+#Carries into the Penalty Box
+penalty_box_carries_attempted <- match_event_data %>%
+  filter(type.name == "Carry") %>% 
+  filter((location.x < 102 | location.y < 18 | location.y > 62) &  #starts outside the penalty box
+           carry.end_location.x >= 102 & carry.end_location.y >= 18 & carry.end_location.y <= 62) %>%  #ends inside the penalty box
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalty_box_carries_attempted = n())
+
+#Dribbles Completed
+dribbles_completed <- match_event_data %>%
+  filter(type.name == "Dribble" & dribble.outcome.name == "Complete") %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(dribbles_completed = n())
+
+#Dribbles Attempted
+dribbles_attempted <- match_event_data %>%
+  filter(type.name == "Dribble") %>% 
+  group_by(player.name, player.id, team.name) %>%
+  summarise(dribbles_attempted = n())
+
+#Dispossessed (Lost ball not whilst dribbling)
+times_dispossessed <- match_event_data %>%
+  filter(type.name == "Dispossessed") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(times_dispossessed = n())
+
+#Miscontrols
+miscontrols <- match_event_data %>%
+  filter(type.name == "Miscontrol") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(miscontrols = n())
+
+#Fouls won
+fouls_won <- match_event_data %>%
+  filter(type.name == "Foul Won") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(fouls_won = n())
+
+#Penalties Won
+penalties_won <- match_event_data %>%
+  filter(type.name == "Foul Won" & foul_won.penalty == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalties_won = n())
+
+#Balls received in opposition box
+balls_received_box <- match_event_data %>%
+  filter(type.name == "Ball Receipt*") %>%
+  filter(location.x >= 102 & location.y >= 18 & location.y <= 62) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(balls_received_box = n(), .groups = "drop")
+
+#List of dribbling dfs
+dribbling_dfs <- list(minutes_played, carries, progressive_carries, distanced_progressed_carries, 
+                      final_3rd_carries_attempted,penalty_box_carries_attempted, dribbles_completed, 
+                      dribbles_attempted, times_dispossessed, miscontrols, fouls_won, penalties_won, 
+                      balls_received_box)
+
+#Merge dfs in the list
+dribbling_stats <- reduce(dribbling_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+dribbling_stats[is.na(dribbling_stats)] <- 0
+
+#Calculate success rates of stats
+dribbling_stats <- dribbling_stats %>%
+  mutate(dribble_success_rate = ifelse(dribbles_attempted > 0, (dribbles_completed / dribbles_attempted) * 100, 0))
+
+#Use function to calculate per 90 stats
+dribbling_stats <- calculate_per90(dribbling_stats)
+
+#Use function to add team averages
+dribbling_stats <- add_team_weighted_averages(dribbling_stats)
+
+#----Shooting Stats----
+
+#Shots 
+shots <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots = n())
+
+#Goals
+goals <- match_event_data %>%
+  filter(shot.outcome.name == "Goal") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals = n())
+
+#Shots off Target
+shots_off_target <- match_event_data %>%
+  filter(shot.outcome.name == "Off T" | shot.outcome.name == "Saved Off T" | 
+           shot.outcome.name == "Wayward" | shot.outcome.name == "Post" | shot.outcome.name == "Blocked") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_off_target = n())
+
+#Blocked Shots
+blocked_shots <- match_event_data %>%
+  filter(shot.outcome.name == "Blocked") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(blocked_shots = n())
+
+#Shot Hit the Woodwork
+shots_woodwork <- match_event_data %>%
+  filter(shot.outcome.name == "Post") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_woodwork = n())
+
+#Shots on Target
+shots_on_target <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" | shot.outcome.name == "Saved" |
+           shot.outcome.name == "Saved To Post") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_on_target = n())
+
+#Shots Inside the Box 
+shots_inside_box <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  filter(location.x >= 102 & location.y >= 18 & location.y <= 62) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_inside_box = n())
+
+#Goals Inside the Box
+goals_inside_box <- match_event_data %>%
+  filter(shot.outcome.name == "Goal") %>%
+  filter(location.x >= 102 & location.y >= 18 & location.y <= 62) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_inside_box = n())
+
+#Shots Outside the Box 
+shots_outside_box <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  filter(location.x < 102 | location.y < 18 | location.y > 62) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_outside_box = n())
+
+#Goals Outside the Box
+goals_outside_box <- match_event_data %>%
+  filter(shot.outcome.name == "Goal") %>%
+  filter(location.x < 102 | location.y < 18 | location.y > 62) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_outside_box = n())
+
+#Penalties Scored
+pens_scored <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & shot.type.name == "Penalty") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(pens_scored = n())
+
+#Penalties Taken
+pens_taken <- match_event_data %>%
+  filter(shot.type.name == "Penalty") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(pens_taken = n())
+
+#Total xG
+xG <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(xG = sum(shot.statsbomb_xg, na.rm = TRUE))
+
+#Non Penalty xG
+npxG <- match_event_data %>%
+  filter(type.name == "Shot" & shot.type.name != "Penalty") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(npxG = sum(shot.statsbomb_xg, na.rm = TRUE))
+
+#Goals scored directly from Free Kicks
+goals_direct_fk <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & shot.type.name == "Free Kick") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_direct_fk = n())
+
+#Goals scored indirectly from Free Kicks
+goals_indirect_fk <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & play_pattern.name == "From Free Kick" & shot.type.name != "Free Kick") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_indirect_fk = n())
+
+#Goals scored from Corners
+goals_corners <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & play_pattern.name == "From Corner") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_corners = n(), .groups = "drop")
+
+#List of shooting dfs
+shooting_dfs <- list(minutes_played, shots, goals, shots_off_target, blocked_shots, 
+                     shots_woodwork, shots_on_target,shots_inside_box, goals_inside_box, 
+                     shots_outside_box, goals_outside_box, pens_scored, pens_taken, xG, 
+                     npxG, goals_direct_fk, goals_indirect_fk, goals_corners)
+
+#Merge dfs in the list
+shooting_stats <- reduce(shooting_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+shooting_stats[is.na(shooting_stats)] <- 0
+
+#Calculate success rates of stats
+shooting_stats <- shooting_stats %>%
+  mutate(shot_accuracy = ifelse(shots > 0, (shots_on_target / shots) * 100, 0),
+         conversion_rate = ifelse(shots > 0, (goals / shots) * 100, 0),
+         penalty_conversion_rate = ifelse(pens_taken > 0, (pens_scored / pens_taken) * 100, 0),
+         inside_box_conversion_rate = ifelse(shots_inside_box > 0, (goals_inside_box / shots_inside_box) * 100, 0),
+         outside_box_conversion_rate = ifelse(shots_outside_box > 0, (goals_outside_box / shots_outside_box) * 100, 0),
+         outside_box_shot_rate = ifelse(shots_outside_box > 0, (shots_inside_box / shots_outside_box) * 100, 0),
+         goals_xG_diff = goals - xG)
+
+#Use function to calculate per 90 stats
+shooting_stats <- calculate_per90(shooting_stats)
+
+#Use function to add team averages
+shooting_stats <- add_team_weighted_averages(shooting_stats)
+
+#----Goalkeeping Stats----
+
+#Own Goals Conceded
+own_goals_conceded_gk <- match_event_data %>%
+  filter(type.name == "Own Goal Against") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(own_goals_conceded_gk = n())
+
+#Collects Completed
+collects_completed <- match_event_data %>%
+  filter(goalkeeper.type.name == "Collected" & 
+           (goalkeeper.outcome.name == "Success" | goalkeeper.outcome.name == "CollectedTwice")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(collects_completed = n())
+
+#Collects Attempted
+collects_attempted <- match_event_data %>%
+  filter(goalkeeper.type.name == "Collected") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(collects_attempted = n())
+
+#Goals Conceded
+goals_conceded_gk <- match_event_data %>%
+  filter(goalkeeper.type.name == "Goal Conceded") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_conceded_gk = n())
+
+#Acting as sweeper
+sweeper <- match_event_data %>%
+  filter(goalkeeper.type.name == "Keeper Sweeper" & 
+           (goalkeeper.outcome.name == "Success" | goalkeeper.outcome.name == "Won" |
+              goalkeeper.outcome.name == "Claim" | goalkeeper.outcome.name == "Clear")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(sweeper = n())
+
+#Penalties Saved
+penalties_saved <- match_event_data %>%
+  filter(goalkeeper.type.name == "Penalty Saved" | goalkeeper.type.name == "Penalty Saved to Post") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalties_saved = n())
+
+#Penalties Faced
+penalties_faced <- match_event_data %>%
+  filter(goalkeeper.type.name == "Penalty Saved" | goalkeeper.type.name == "Penalty Conceded" | 
+           goalkeeper.type.name == "Penalty Saved To Post") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalties_faced = n())
+
+#Penalties Saved into Danger
+penalties_saved_danger <- match_event_data %>%
+  filter((goalkeeper.type.name == "Penalty Saved" | goalkeeper.type.name == "Penalty Saved to Post") &
+           (goalkeeper.outcome.name == "In Play Danger" | goalkeeper.outcome.name == "Touched Out")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(penalties_saved_danger = n())
+
+#Punches Completed
+punches_completed <- match_event_data %>%
+  filter(goalkeeper.type.name == "Punch" & 
+           (goalkeeper.outcome.name == "Success" | goalkeeper.outcome.name == "In Play Safe")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(punches_completed = n())
+
+#Punches Attempted
+punches_attempted <- match_event_data %>%
+  filter(goalkeeper.type.name == "Punch") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(punches_attempted = n())
+
+#Smothers Completed
+smothers_completed <- match_event_data %>%
+  filter(goalkeeper.type.name == "Smother" & 
+           (goalkeeper.outcome.name == "Success" | goalkeeper.outcome.name == "Won")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(smothers_completed = n())
+
+#Smothers Attempted
+smothers_attempted <- match_event_data %>%
+  filter(goalkeeper.type.name == "Smother") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(smothers_attempted = n())
+
+#Shots Saved
+shots_saved <- match_event_data %>%
+  filter(goalkeeper.type.name == "Shot Saved to Post" | goalkeeper.type.name == "Shot Saved" |
+           goalkeeper.type.name == "Penalty Saved" | goalkeeper.type.name == "Penalty Saved to Post") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_saved = n())
+
+#Shots Faced on Target
+shots_faced_on_target <- match_event_data %>%
+  filter(goalkeeper.type.name == "Shot Saved to Post" | goalkeeper.type.name == "Shot Saved" | 
+           goalkeeper.type.name == "Penalty Saved" | goalkeeper.type.name == "Penalty Conceded" | 
+           goalkeeper.type.name == "Penalty Saved to Post" | goalkeeper.type.name == "Goal Conceded") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(shots_faced_on_target = n())
+
+#Shots Saved into Danger
+saved_danger <- match_event_data %>%
+  filter((goalkeeper.type.name == "Shot Faced" | goalkeeper.type.name == "Shot Saved to Post" | 
+            goalkeeper.type.name == "Shot Saved" | goalkeeper.type.name == "Penalty Saved" | 
+            goalkeeper.type.name == "Penalty Conceded" | goalkeeper.type.name == "Penalty Saved to Post" | 
+            goalkeeper.type.name == "Shot Saved" | goalkeeper.type.name == "Goal Conceded" | 
+            goalkeeper.type.name == "Shot Saved Off Target") &
+           (goalkeeper.outcome.name == "In Play Danger" | goalkeeper.outcome.name == "Touched Out" |
+              goalkeeper.outcome.name == "")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(saved_danger = n())
+
+#Goals from the keeper or goals kicks
+goals_from_gk <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & 
+           (play_pattern.name == "From Goal Kick" | play_pattern.name == "From Keeper")) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_from_gk = n())
+
+#xG Faced
+#get data of shots faced by each gk
+xG_against_data_gk <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  select(match_id, adjusted_time, shooting_team = team.name, shot.statsbomb_xg, position.id) %>%
+  #work out what gk faced the shot
+  left_join(matches_analysed, by = "match_id", relationship = "many-to-many") %>%
+  mutate(conceding_team = case_when(
+    shooting_team == home_team.home_team_name ~ away_team.away_team_name,
+    shooting_team == away_team.away_team_name ~ home_team.home_team_name,
+    TRUE ~ NA_character_)) %>%
+  select(match_id, adjusted_time, conceding_team, shot.statsbomb_xg)
+#calcualte total xg
+xG_against_gk <- playing_time_total %>%
+  left_join(xG_against_data_gk, by = "match_id", relationship = "many-to-many") %>%
+  filter(team.name == conceding_team) %>% 
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, conceding_team) %>%
+  summarise(xG_against_gk = sum(shot.statsbomb_xg, na.rm = TRUE), .groups = "drop") %>%
+  rename(team.name = conceding_team) %>%
+  #filter to only include gk
+  semi_join(most_played_position %>% filter(position.id == 1), by = "player.id")
+
+#List of Goalkeeping dfs
+goalkeeping_dfs <- list(minutes_played, own_goals_conceded_gk, collects_completed, collects_attempted, 
+                        goals_conceded_gk, sweeper,penalties_saved, penalties_faced, penalties_saved_danger, 
+                        punches_completed, punches_attempted,smothers_completed, smothers_attempted, 
+                        shots_saved, shots_faced_on_target, saved_danger, goals_from_gk, xG_against_gk)
+
+#Merge dfs in the list
+goalkeeping_stats <- reduce(goalkeeping_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+goalkeeping_stats[is.na(goalkeeping_stats)] <- 0
+
+#Calculate success rates of stats
+goalkeeping_stats <- goalkeeping_stats %>%
+  mutate(collect_success_rate = ifelse(collects_attempted > 0, (collects_completed / collects_attempted) * 100, 0),
+         punch_success_rate = ifelse(punches_attempted > 0, (punches_completed / punches_attempted) * 100, 0),
+         smother_success_rate = ifelse(smothers_attempted > 0, (smothers_completed / smothers_attempted) * 100, 0),
+         save_percentage = ifelse(shots_faced_on_target > 0, (shots_saved / shots_faced_on_target) * 100, 0),
+         penalty_save_rate = ifelse(penalties_faced > 0, (penalties_saved / penalties_faced) * 100, 0),
+         xG_prevented = xG_against_gk - goals_conceded_gk)
+
+#Use function to calculate per 90 stats
+goalkeeping_stats <- calculate_per90(goalkeeping_stats)
+
+#Use function to add team averages
+goalkeeping_stats <- add_team_weighted_averages(goalkeeping_stats)
+
+#----Miscellaneous Stats----
+
+#Total Progressive Actions (Passes + Carries)
+progressive_actions <- progressive_passes_completed %>%
+  merge(progressive_carries, by = c("player.name", "player.id", "team.name"), all = TRUE) %>%
+  mutate(progressive_actions = progressive_passes_completed + progressive_carries) %>%
+  select(player.name, player.id, team.name, progressive_actions)
+
+#Total Progressive Distance (Passes + Carries)
+progressive_distance <- distanced_progressed_passes %>%
+  merge(distanced_progressed_carries, by = c("player.name", "player.id", "team.name"), all = TRUE) %>%
+  mutate(distanced_progressed = distanced_progressed_passes + distanced_progressed_carries) %>%
+  select(player.name, player.id, team.name, distanced_progressed)
+
+#Passed to Offside
+passed_offside <- match_event_data %>%
+  filter(pass.outcome.name == "Pass Offside") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(passed_offside = n())
+
+#Been Offside
+#calculate receiver of offside pass
+been_offside_pass <- match_event_data %>%
+  filter(pass.outcome.name == "Pass Offside") %>%
+  group_by(pass.recipient.name, pass.recipient.id, team.name) %>%
+  summarise(been_offside_pass = n()) %>%
+  select(player.name = pass.recipient.name, player.id = pass.recipient.id, team.name, been_offside_pass)
+#calculate other offside offences
+been_offside_other <- match_event_data %>%
+  filter(type.name == "Offside") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(been_offside_other = n())
+#add them up
+been_offside <- full_join(been_offside_pass, been_offside_other, by = c("player.name", "player.id", "team.name")) %>%
+  mutate(been_offside_pass = ifelse(is.na(been_offside_pass), 0, been_offside_pass),
+         been_offside_other = ifelse(is.na(been_offside_other), 0, been_offside_other),
+         been_offside = been_offside_pass + been_offside_other) %>%
+  select(-been_offside_pass, -been_offside_other)
+
+#Aerial Duels Won
+aerial_duel_won <- match_event_data %>%
+  filter(clearance.aerial_won == TRUE | miscontrol.aerial_won == TRUE |
+           shot.aerial_won == TRUE | pass.aerial_won == TRUE) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(aerial_duel_won = n())
+
+#Aerial Duels Attempted
+aerial_duel_attempted <- match_event_data %>%
+  filter(clearance.aerial_won == TRUE | miscontrol.aerial_won == TRUE |
+           shot.aerial_won == TRUE | pass.aerial_won == TRUE |
+           duel.type.name == "Aerial Lost") %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(aerial_duel_attempted = n(), .groups = "drop")
+
+#List of Miscellaneous dfs
+miscellaneous_dfs <- list(minutes_played, progressive_actions, progressive_distance, 
+                          passed_offside, been_offside, aerial_duel_won, aerial_duel_attempted)
+
+#Merge dfs in the list
+miscellaneous_stats <- reduce(miscellaneous_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+#Replace NAs with 0
+miscellaneous_stats[is.na(miscellaneous_stats)] <- 0
+
+#Calculate success rates of stats
+miscellaneous_stats <- miscellaneous_stats %>%
+  mutate(aerial_duel_success_rate = ifelse(aerial_duel_attempted > 0, (aerial_duel_won / aerial_duel_attempted) * 100, 0))
+
+#Use function to calculate per 90 stats
+miscellaneous_stats <- calculate_per90(miscellaneous_stats)
+
+#Use function to add team averages
+miscellaneous_stats <- add_team_weighted_averages(miscellaneous_stats)
+
+#----Whilst on the Pitch Stats----
+
+#Goals For Whilst on the Pitch
+#filter event data to only include goals
+goals_for_data <- match_event_data %>%
+  filter(shot.outcome.name == "Goal") %>%
+  select(match_id, adjusted_time, team.name)
+#calculate what players were on the pitch when the goals were scored
+goals_for_on_pitch <- playing_time_total %>%
+  inner_join(goals_for_data, by = c("match_id", "team.name"), relationship = "many-to-many") %>%
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_for_on_pitch = n(), .groups = "drop")
+
+#xG For Whilst on the Pitch
+#filter event data to only include shots
+shots_for_data <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  select(match_id, adjusted_time, team.name, shot.statsbomb_xg)
+#calculate what players were on the pitch when the shot was taken
+xG_for_on_pitch <- playing_time_total %>%
+  inner_join(shots_for_data, by = c("match_id", "team.name"), relationship = "many-to-many") %>%
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(xG_for_on_pitch = sum(shot.statsbomb_xg, na.rm = TRUE), .groups = "drop")
+
+#npxG For Whilst on the Pitch
+#filter event data to only include shots excluding penalties
+np_shots_for_data <- match_event_data %>%
+  filter(type.name == "Shot" & shot.type.name != "Penalty") %>%
+  select(match_id, adjusted_time, team.name, shot.statsbomb_xg)
+#calculate what players were on the pitch when the shot was taken
+npxG_for_on_pitch <- playing_time_total %>%
+  inner_join(np_shots_for_data, by = c("match_id", "team.name"), relationship = "many-to-many") %>%
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(npxG_for_on_pitch = sum(shot.statsbomb_xg, na.rm = TRUE), .groups = "drop")
+
+#Goals Against
+#filter event data to only include goals
+goals_against_data <- match_event_data %>%
+  filter(shot.outcome.name == "Goal") %>%
+  select(match_id, adjusted_time, scoring_team = team.name) %>%
+  #calculate what team conceded the goal
+  left_join(matches_analysed, by = "match_id", relationship = "many-to-many") %>%
+  mutate(conceding_team = case_when(
+    scoring_team == home_team.home_team_name ~ away_team.away_team_name,
+    scoring_team == away_team.away_team_name ~ home_team.home_team_name,
+    TRUE ~ NA_character_)) %>%
+  select(match_id, adjusted_time, conceding_team)
+#calculate what players were on the pitch when the goal was conceded
+goals_against_on_pitch <- playing_time_total %>%
+  left_join(goals_against_data, by = "match_id", relationship = "many-to-many") %>%
+  filter(team.name == conceding_team) %>% 
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, conceding_team) %>%
+  summarise(goals_against_on_pitch = n(), .groups = "drop") %>%
+  rename(team.name = conceding_team)
+
+#xG Against
+#filter event data to only include shots
+xG_against_data <- match_event_data %>%
+  filter(type.name == "Shot") %>%
+  select(match_id, adjusted_time, shooting_team = team.name, shot.statsbomb_xg) %>%
+  #calculate what team conceded the shot
+  left_join(matches_analysed, by = "match_id", relationship = "many-to-many") %>%
+  mutate(conceding_team = case_when(
+    shooting_team == home_team.home_team_name ~ away_team.away_team_name,
+    shooting_team == away_team.away_team_name ~ home_team.home_team_name,
+    TRUE ~ NA_character_)) %>%
+  select(match_id, adjusted_time, conceding_team, shot.statsbomb_xg)
+#calculate what players were on the pitch when the shot was conceded
+xG_against_on_pitch <- playing_time_total %>%
+  left_join(xG_against_data, by = "match_id", relationship = "many-to-many") %>%
+  filter(team.name == conceding_team) %>% 
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, conceding_team) %>%
+  summarise(xG_against_on_pitch = sum(shot.statsbomb_xg, na.rm = TRUE), .groups = "drop") %>%
+  rename(team.name = conceding_team)
+
+#npxG Against
+#filter event data to only include shots excluding penalties
+npxG_against_data <- match_event_data %>%
+  filter(type.name == "Shot" & shot.type.name != "Penalty") %>%
+  select(match_id, adjusted_time, shooting_team = team.name, shot.statsbomb_xg) %>%
+  #calculate what team conceded the shot
+  left_join(matches_analysed, by = "match_id", relationship = "many-to-many") %>%
+  mutate(conceding_team = case_when(
+    shooting_team == home_team.home_team_name ~ away_team.away_team_name,
+    shooting_team == away_team.away_team_name ~ home_team.home_team_name,
+    TRUE ~ NA_character_)) %>%
+  select(match_id, adjusted_time, conceding_team, shot.statsbomb_xg)
+#calculate what players were on the pitch when the shot was conceded
+npxG_against_on_pitch <- playing_time_total %>%
+  left_join(xG_against_data, by = "match_id", relationship = "many-to-many") %>%
+  filter(team.name == conceding_team) %>% 
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, conceding_team) %>%
+  summarise(npxG_against_on_pitch = sum(shot.statsbomb_xg, na.rm = TRUE), .groups = "drop") %>%
+  rename(team.name = conceding_team)
+
+#Offsides Won
+#filter event data to only include offsides
+offsides_won_data <- match_event_data %>%
+  filter(pass.outcome.name == "Pass Offside" | type.name == "Offside") %>%
+  select(match_id, adjusted_time, offside_team = team.name) %>%
+  #calculate what team won the offside
+  left_join(matches_analysed, by = "match_id", relationship = "many-to-many") %>%
+  mutate(team_won_offside = case_when(
+    offside_team == home_team.home_team_name ~ away_team.away_team_name,
+    offside_team == away_team.away_team_name ~ home_team.home_team_name,
+    TRUE ~ NA_character_)) %>%
+  select(match_id, adjusted_time, team_won_offside)
+#calculate what players were on the pitch when the offside was won
+offsides_won_on_pitch <- playing_time_total %>%
+  left_join(offsides_won_data, by = "match_id", relationship = "many-to-many") %>%
+  filter(team.name == team_won_offside) %>%  # Match player's team to opposition
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, team_won_offside) %>%
+  summarise(offsides_won_data = n(), .groups = "drop") %>%
+  rename(team.name = team_won_offside)
+
+#Goals from Counter For Whilst on the Pitch
+#filter event data to only include goals from counters
+goals_for_counter_data <- match_event_data %>%
+  filter(shot.outcome.name == "Goal" & play_pattern.name == "From Counter") %>%
+  select(match_id, adjusted_time, team.name)
+#calculate what players were on the goal was scored
+goals_for_counter_on_pitch <- playing_time_total %>%
+  inner_join(goals_for_counter_data, by = c("match_id", "team.name"), relationship = "many-to-many") %>%
+  filter(adjusted_time >= from_minutes & adjusted_time <= to_minutes) %>%
+  group_by(player.name, player.id, team.name) %>%
+  summarise(goals_for_counter_on_pitch = n(), .groups = "drop")
+
+# Combine Whilst on the Pitch Stats
+whilst_on_pitch_dfs <- list(minutes_played, goals_for_on_pitch, xG_for_on_pitch, npxG_for_on_pitch, 
+                            goals_against_on_pitch, xG_against_on_pitch, npxG_against_on_pitch, 
+                            offsides_won_on_pitch, goals_for_counter_on_pitch)
+
+# Merge all data frames in the list
+whilst_on_pitch_stats <- reduce(whilst_on_pitch_dfs, full_join, by = c("player.name", "player.id", "team.name"))
+
+# Replace NA values with 0
+whilst_on_pitch_stats[is.na(whilst_on_pitch_stats)] <- 0
+
+# Calculating metrics
+whilst_on_pitch_stats <- whilst_on_pitch_stats %>%
+  mutate(net_goals_on_pitch = goals_for_on_pitch - goals_against_on_pitch,
+         net_xG_on_pitch = xG_for_on_pitch - xG_against_on_pitch,
+         net_npxG_on_pitch = npxG_for_on_pitch - npxG_against_on_pitch)
+
+# Apply per-90 calculation for individual players
+whilst_on_pitch_stats <- calculate_per90(whilst_on_pitch_stats)
+
+# Add weighted team averages
+whilst_on_pitch_stats <- add_team_weighted_averages(whilst_on_pitch_stats)
+
+#----Merge Dfs----
+
+#clean environment
+rm(list = ls()[!ls() %in% c("match_event_data", "appearances_stats", "minutes_played_positional", "most_played_position",
+                            "passing_stats", "defensive_stats", "dribbling_stats", "shooting_stats",
+                            "goalkeeping_stats", "miscellaneous_stats", "whilst_on_pitch_stats")])
+
+# Combine Miscellaneous Stats
+combined_stats_dfs <- list(appearances_stats, most_played_position, passing_stats, defensive_stats, dribbling_stats, 
+                           shooting_stats, goalkeeping_stats, miscellaneous_stats, whilst_on_pitch_stats)
+
+# Merge all data frames in the list
+combined_stats <- reduce(combined_stats_dfs, full_join, by = c("player.name", "player.id", "team.name", "minutes_played"))
+
+# Round all numeric columns to 2 decimal points
+combined_stats <- combined_stats %>%
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+#----Save as CSV----
+
+write.csv(combined_stats, file = "Prem_Stats_2015-16.csv", row.names = FALSE)
+
+#----Create Table in Excel----
+
+#create a new excel workbook
+wb <- createWorkbook()
+
+#add a worksheet
+addWorksheet(wb, "All Stats")
+
+#write the data to the worksheet with table formatting
+writeDataTable(wb, 
+               sheet = "All Stats", 
+               x = combined_stats, 
+               tableStyle = "TableStyleMedium8")
+
+#create header style
+headerStyle <- createStyle(
+  fontSize = 12, 
+  fontColour = "white", 
+  fgFill = "black",
+  halign = "center", 
+  textDecoration = "bold", 
+  border = "Bottom")
+
+#change the style of table in excel output
+addStyle(wb, 
+         sheet = "All Stats", 
+         style = headerStyle, 
+         rows = 1, 
+         cols = 1:ncol(combined_stats), 
+         gridExpand = TRUE)
+
+#adjust column widths for better readability
+setColWidths(wb, 
+             sheet = "All Stats", 
+             cols = 1:ncol(combined_stats), 
+             widths = "auto")
+
+#save as an Excel file
+saveWorkbook(wb, "Prem_Stats_2015-16_Table.xlsx", overwrite = TRUE)
