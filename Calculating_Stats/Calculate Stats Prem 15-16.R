@@ -42,16 +42,6 @@ unnested_lineups <- unnested_lineups %>%
   mutate(player.name = coalesce(player.name.y, player.name.x)) %>%
   select(-player.name.x, -player.name.y)
 
-#Change player name to nickname for all relevant players for event df
-#match_event_data <- match_event_data %>%
-#  left_join(player_nicknames, by = "player.id") %>%
-#  mutate(player.name = coalesce(player.name.y, player.name.x)) %>%
-#  select(-player.name.x, -player.name.y) %>%
-#  left_join(player_nicknames, by = c("pass.recipient.id" = "player.id")) %>%
-#  mutate(pass.recipient.name = player.name.y) %>%
-#  select(-player.name.y) %>%
-#  rename(player.name = player.name.x)
-
 #Calculate minutes for event data for calculations
 match_event_data$time <- match_event_data$minute + match_event_data$second / 60
 
@@ -1287,13 +1277,3 @@ combined_stats <- combined_stats %>%
 
 #save as csv
 write.csv(combined_stats, file = "Prem Stats 15-16.csv")
-
-#----Future Ideas----
-
-#Add Percentiles for each player
-#Do all stats against Team
-#Average Stats for the team in position groups
-#Average stats for league
-#Clustering to identify positions on combined stats
-#Radar charts for each section of stats
-#Time Wasting Stats
