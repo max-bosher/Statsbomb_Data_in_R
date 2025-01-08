@@ -1,4 +1,4 @@
-# PlayerPerformanceMetrics_Statsbomb
+# Calculating Stats for the 2015/16 Premier League Season
 The code uses free StatsBomb data to calculate a wide range of advanced statistics for individual players and teams, for the 2015/16 Premier League season, although the code is designed so that it easily could be altered to be used on any Statsbomb Data.
 
 ## Overview
