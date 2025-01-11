@@ -18,7 +18,9 @@ player_analysed <- "Riyad Mahrez"
 
 #Filter to only include passes from correct player
 shot_map_data <- match_event_data %>%
-  filter(player.name == player_analysed & type.name == "Shot" & !is.na(shot.end_location.z))
+  filter(player.name == player_analysed & type.name == "Shot" & !is.na(shot.end_location.z)) %>%
+  mutate(shot.end_location.y = pmin(pmax(shot.end_location.y, 34), 46),
+         shot.end_location.z = pmin(pmax(shot.end_location.z, -0.2), 3.5))
 
 #----Plot Goal----
 
@@ -50,17 +52,45 @@ plot_goal <- function(background_colour, line_colour, goal_colour) {
   goal_height <- 2.67
   goal_depth <- 0
   
+  #Plot Limits
+  width <- c(34,46)
+  height <- c(0, 3.5)
+  
+  #Gridline dimensions
+  gridlines_horizontal <- data.frame(y = seq(goal_depth, goal_height, length.out = 5), 
+                                     x_start = goal_width[1], x_end = goal_width[2])
+  gridlines_vertical <- data.frame(x = seq(goal_width[1], goal_width[2], length.out = 7), 
+                                   y_start = goal_depth, y_end = goal_height)
+  
   #Plot goal
   plot <- ggplot() +
     theme_blankGoal() +
     #Plot goal box
-    geom_rect(aes(xmin = goal_width[1], xmax = goal_width[2], ymin = goal_depth, ymax = goal_height), fill = background_colour, colour = line_colour) +
+    geom_rect(aes(xmin = goal_width[1], xmax = goal_width[2], ymin = goal_depth, ymax = goal_height), 
+              fill = background_colour, colour = line_colour) +
+    #Add horizontal gridlines
+    geom_segment(data = gridlines_horizontal, 
+                 aes(x = x_start, xend = x_end, y = y, yend = y), 
+                 colour = "grey", linetype = "dashed") +
+    #Add vertical gridlines
+    geom_segment(data = gridlines_vertical, 
+                 aes(x = x, xend = x, y = y_start, yend = y_end), 
+                 colour = "grey", linetype = "dashed") +
+    #Add grey border around plot
+    geom_rect(aes(xmin = width[1], xmax = width[2], ymin = height[1], ymax = height[2]), 
+              fill = NA, colour = "grey", linewidth = 0.5) +
     #Add posts
-    geom_segment(aes(x = goal_width[1], y = goal_depth, xend = goal_width[1], yend = goal_height), colour = goal_colour, linewidth = 1.5) +
-    geom_segment(aes(x = goal_width[2], y = goal_depth, xend = goal_width[2], yend = goal_height), colour = goal_colour, linewidth = 1.5) +
+    geom_segment(aes(x = goal_width[1], y = goal_depth, xend = goal_width[1], yend = goal_height), 
+                 colour = goal_colour, linewidth = 1.5) +
+    geom_segment(aes(x = goal_width[2], y = goal_depth, xend = goal_width[2], yend = goal_height), 
+                 colour = goal_colour, linewidth = 1.5) +
     #Add crossbar
-    geom_segment(aes(x = goal_width[1], y = goal_height, xend = goal_width[2], yend = goal_height), colour = goal_colour, linewidth = 1.5) +
-    #Set limits for plot
+    geom_segment(aes(x = goal_width[1], y = goal_height, xend = goal_width[2], yend = goal_height), 
+                 colour = goal_colour, linewidth = 1.5) +
+    #Add white line along the bottom
+    geom_segment(aes(x = width[1], y = goal_depth, xend = width[2], yend = goal_depth), 
+                 colour = "white", linewidth = 1) +
+    # Set limits for plot
     xlim(c(34, 46)) +
     ylim(c(-0.2, 3.5))
   
@@ -90,7 +120,7 @@ plot_blank_goal +
                         guide = guide_legend(override.aes = list(color = "white"))) +
   coord_fixed(ratio = 105/100) +
   #Add titles
-  labs(title = player_analysed, subtitle = "Shot Map, Premier League, 2015/16") +
+  labs(title = player_analysed, subtitle = "Shot Outcome Map, Premier League, 2015/16") +
   #Make whole plot the same colour with white text
   theme_minimal(base_size = 16) +
   theme(plot.background = element_rect(fill = "#224C56", color = NA),
