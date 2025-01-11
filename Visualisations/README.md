@@ -15,13 +15,13 @@ Detailed Visualisations: Use of shapes, colors, and sizes to display event detai
    
   Displays a player's movement and involvement across the pitch, highlighting the areas where they were most active.
 
-![Heatmap](https://github.com/user-attachments/assets/f40132f7-d21b-4410-9d8f-026871509c9c)
+![Heatmap](https://github.com/user-attachments/assets/ce093562-5645-4327-8724-122440a75380)
 
 ### 2. Shot Outcome Map
 
   Visualises end locations and outcomes of the shots taken by a player
 
-![Shot Outcome Map](https://github.com/user-attachments/assets/86337536-4d72-404b-8350-2d5d95a325ae)
+![Shot Outcome Map](https://github.com/user-attachments/assets/2d95ed6d-79b4-418d-a544-958c6ee68d51)
 
 ### 3. Shot Map
 
@@ -44,5 +44,5 @@ Detailed Visualisations: Use of shapes, colors, and sizes to display event detai
 ### 6. Pass Map
   
   Visualises all the passes by a player, categorising them by outcome (successful, unsuccessful, or assisted).
-
-![Pass Map](https://github.com/user-attachments/assets/6581e1b5-90c7-48e9-bb6f-d548edc97716)
+  
+![Pass Map](https://github.com/user-attachments/assets/8b53e2d4-cdbc-4af3-a03c-8f51712dd19f)
