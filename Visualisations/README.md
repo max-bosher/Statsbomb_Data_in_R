@@ -1,9 +1,48 @@
 # Visualisations
+This repository contains code to create visualisations for analysing player performance using Statsbomb data, such shot, pass and heatmaps. These visualisations enable users to gain insights into player behavior, movement, and effectiveness on the pitch, making them valuable for performance analysis and scouting.
 
+## Key Features
 
-![Rplot05](https://github.com/user-attachments/assets/f40132f7-d21b-4410-9d8f-026871509c9c)
-![Rplot04](https://github.com/user-attachments/assets/1d933532-e32c-4996-af2b-d7f90c662ccd)
-![Rplot03](https://github.com/user-attachments/assets/53c313e3-c20a-4d6b-be59-52931303915c)
-![Rplot02](https://github.com/user-attachments/assets/16bb311d-3680-4696-a71e-823024089ec0)
-![Rplot01](https://github.com/user-attachments/assets/ffce6386-2e3c-435b-ae7f-69de7e8295e9)
-![Rplot](https://github.com/user-attachments/assets/25896868-d77b-47e6-adc8-02b687e6f6b5)
+Consistency: All visualisations follow a unified theme for readability and visual appeal.
+
+Customisability: Easily switch between players, matches, or seasons for tailored analysis.
+
+Detailed Visualisations: Use of shapes, colors, and sizes to display event details (e.g., xG values, outcomes).
+
+## Examples
+
+### 1. Heatmap
+   
+  Displays a player's movement and involvement across the pitch, highlighting the areas where they were most active.
+
+![Heatmap](https://github.com/user-attachments/assets/f40132f7-d21b-4410-9d8f-026871509c9c)
+
+### 2. Shot Outcome Map
+
+  Visualises end locations and outcomes of the shots taken by a player
+
+![Shot Outcome Map](https://github.com/user-attachments/assets/86337536-4d72-404b-8350-2d5d95a325ae)
+
+### 3. Shot Map
+
+  Visualises the locations and characteristics of shots taken by a player, including xG values and body part used.
+
+![Shot Map](https://github.com/user-attachments/assets/c2a80f80-9d78-4699-8fa1-abf51842f1f6)
+
+### 4. Defensive Action Map
+
+  Visualises defensive actions such as tackles, interceptions, and clearances, categorised by type by a player.
+
+![Defensive Actions Map](https://github.com/user-attachments/assets/25896868-d77b-47e6-adc8-02b687e6f6b5)
+
+### 5. Key Pass Map
+  
+  Visualises the key passes made by a player, including the origin, direction, and outcome of each pass.
+
+![Key Pass Map](https://github.com/user-attachments/assets/1d933532-e32c-4996-af2b-d7f90c662ccd)
+
+### 6. Pass Map
+  
+  Visualises all the passes by a player, categorising them by outcome (successful, unsuccessful, or assisted).
+
+![Pass Map](https://github.com/user-attachments/assets/6581e1b5-90c7-48e9-bb6f-d548edc97716)
