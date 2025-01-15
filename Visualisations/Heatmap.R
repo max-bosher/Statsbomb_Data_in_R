@@ -24,6 +24,7 @@ heatmap_data <- match_event_data %>%
 #----Function to Plot Pitch Markings----
 
 plot_pitch_markings <- function(line_colour) {
+  
   #Pitch dimensions
   ymin <- 0
   ymax <- 80
@@ -31,14 +32,21 @@ plot_pitch_markings <- function(line_colour) {
   xmax <- 120
   
   #Position of pitch features
-  halfwayline <- 60
   boxEdgeDef <- 18
   boxEdgeOff <- 102
+  halfwayline <- 60
+  sixYardDef <- 6
+  sixYardOff <- 114
+  penSpotDef <- 12
+  penSpotOff <- 108
   boxEdgeLeft <- 18
   boxEdgeRight <- 62
-  CentreSpot <- 40
+  sixYardLeft <- 30
+  sixYardRight <- 50
   goalPostLeft <- 36
   goalPostRight <- 44
+  CentreSpot <- 40
+  centreCirle_d <- 20
   
   #Function to plot circles
   circleFun <- function(center = c(0, 0), diameter = 1, npoints = 100) {
@@ -51,23 +59,27 @@ plot_pitch_markings <- function(line_colour) {
   
   #Plot pitch marking
   pitch_markings <- list(geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax), fill = "transparent", colour = line_colour),
-                 geom_rect(aes(xmin = xmin, xmax = boxEdgeDef, ymin = boxEdgeLeft, ymax = boxEdgeRight), fill = "transparent", colour = line_colour),
-                 geom_rect(aes(xmin = boxEdgeOff, xmax = xmax, ymin = boxEdgeLeft, ymax = boxEdgeRight), fill = "transparent", colour = line_colour),
-                 geom_segment(aes(x = halfwayline, y = ymin, xend = halfwayline, yend = ymax), colour = line_colour),
-                 geom_path(data = centre_circle, aes(x = x, y = y), colour = line_colour))
+                         geom_rect(aes(xmin = xmin, xmax = boxEdgeDef, ymin = boxEdgeLeft, ymax = boxEdgeRight), fill = "transparent", colour = line_colour),
+                         geom_rect(aes(xmin = boxEdgeOff, xmax = xmax, ymin = boxEdgeLeft, ymax = boxEdgeRight), fill = "transparent", colour = line_colour),
+                         geom_rect(aes(xmin=xmin, xmax=sixYardDef, ymin=sixYardLeft, ymax=sixYardRight), fill = "transparent", colour = line_colour),
+                         geom_rect(aes(xmin=sixYardOff, xmax=xmax, ymin=sixYardLeft, ymax=sixYardRight), fill = "transparent", colour = line_colour),
+                         geom_point(aes(x = penSpotDef , y = CentreSpot), colour = line_colour, size = 0.75),
+                         geom_point(aes(x = penSpotOff , y = CentreSpot), colour = line_colour, size = 0.75),
+                         geom_segment(aes(x = halfwayline, y = ymin, xend = halfwayline, yend = ymax), colour = line_colour),
+                         geom_path(data = centre_circle, aes(x = x, y = y), colour = line_colour))
   
   #Add circles and semicircles
   pitch_markings <- c(pitch_markings,list(annotate("path", x = 12 + 10 * cos(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
-                                              y = 40 + 10 * sin(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
-                                              col = line_colour),
-        annotate("path", x = (120 - 12) - 10 * cos(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
-                 y = 40 + 10 * sin(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
-                 col = line_colour)))
+                                                   y = 40 + 10 * sin(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
+                                                   col = line_colour),
+                                          annotate("path", x = (120 - 12) - 10 * cos(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
+                                                   y = 40 + 10 * sin(seq(-0.3 * pi, 0.3 * pi, length.out = 30)),
+                                                   col = line_colour)))
   
   #Add goal markings
   pitch_markings <- c(pitch_markings,list(
-        geom_segment(aes(x = xmin, y = goalPostLeft, xend = xmin, yend = goalPostRight), colour = "white", size = 1),
-        geom_segment(aes(x = xmax, y = goalPostLeft, xend = xmax, yend = goalPostRight), colour = "white", size = 1)))
+    geom_segment(aes(x = xmin, y = goalPostLeft, xend = xmin, yend = goalPostRight), colour = "white", size = 1),
+    geom_segment(aes(x = xmax, y = goalPostLeft, xend = xmax, yend = goalPostRight), colour = "white", size = 1)))
   
   return(pitch_markings)
 }
@@ -79,7 +91,7 @@ heatmap_plot <- ggplot() +
   geom_bin2d(data = heatmap_data, aes(x = location.x, y = location.y), bins = 16) +
   scale_fill_gradient(low = "#224C56", high = "red", name = "Action Density") +
   labs(title = player_analysed,
-       subtitle = "Heat Map, Premier League, 2015/16") +
+       subtitle = "Heatmap, Premier League, 2015/16") +
   scale_y_reverse() +
   coord_fixed(ratio = 105/100) +
   #Keep theme consistent with other plots
