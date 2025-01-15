@@ -14,8 +14,8 @@ Detailed Visualisations: Use of shapes, colors, and sizes to display event detai
 ### 1. Heatmap
    
   Displays a player's movement and involvement across the pitch, highlighting the areas where they were most active.
-
-![Heatmap](https://github.com/user-attachments/assets/ce093562-5645-4327-8724-122440a75380)
+  
+  ![Heatmap](https://github.com/user-attachments/assets/9d24bbba-342d-4448-ad86-4263b703efbb)
 
 ### 2. Shot Outcome Map
 
