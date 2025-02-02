@@ -1,12 +1,15 @@
 # Statsbomb Data in R
-The repository uses free StatsBomb event data (from the Premier League 2015/16) in R to calculate stats and create visualisations. These are then used to create a dashboard that provides insights into a player’s performance in a chosen match.
+The repository uses free StatsBomb event data (from the Premier League 2015/16) in R to calculate stats and create visualisations. These are then used to create a shiny dashboard that provides insights into a player’s performance in a chosen match.
 
-<img src="https://github.com/user-attachments/assets/f5a3b9ca-121f-49af-b1ad-248c38ebae29" width="700" height="466">
+An interactive version of the Shiny dashboard is available on my [Shinyapp.io]([https://your-shinyapp-url](https://max-bosher.shinyapps.io/performance_dashboard/)) page. However, due to RAM limitations on the platform, only data for Leicester City is accessible.
+
+![image](https://github.com/user-attachments/assets/c2830589-bb91-45e4-a4a4-2783a23f9123)
+
 
 ## Folder Structure
-### Dashboards:
+### Shiny_Dashboards:
 
-The dashboard is designed to be dynamic, allowing users to analyse any player in any game. It includes:
+This Shiny App is designed to be dynamic, allowing users  to analyse any player in any game. It includes:
 
  - A plot showing the location of all shots, passes, carries and defensive actions.
  - Heatmap
