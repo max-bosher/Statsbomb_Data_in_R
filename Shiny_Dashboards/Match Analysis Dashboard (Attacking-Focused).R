@@ -555,7 +555,7 @@ create_heatmap <- function(player_analysed, match_analysed, match_event_data) {
     return(pitch_markings)
   }
   
-  #Plot heatmpa
+  #Plot heatmap
   heatmap_colours <- ggplot() +
     geom_bin2d(data = heatmap_data, aes(x = location.x, y = location.y), bins = 10) +
     scale_fill_gradient(low = "#224C56", high = "red", name = "Action Density") +
@@ -718,7 +718,7 @@ ui <- fluidPage(
     sidebarPanel(
       style = "background-color: #224C56; color: white;",
       selectInput("team", "Select Team", 
-                  choices = c("Select a team" = "",  # Default empty selection
+                  choices = c("Select a team" = "",
                               setNames(sort(unique(c(list_of_matches$home_team, list_of_matches$away_team))),
                                        sort(unique(c(list_of_matches$home_team, list_of_matches$away_team)))))),
       selectInput("match_id", "Select Match", choices = c("Select a match" = "")),
@@ -769,48 +769,43 @@ server <- function(input, output, session) {
                       selected = "")
   })
   
-  # *** NEW: Create a reactive scaling factor for the legend ***
+  #Change size of teh legend to react to size of users screen
   legend_scale <- reactive({
     req(session$clientData$output_final_plot_width)
-    # Get the current width of the final_plot output area
     plot_width <- session$clientData$output_final_plot_width
-    # Define a "base" width (e.g., 1200 pixels gives scale 1)
     scale <- plot_width / 1200
-    # Clamp the scale between 0.5 and 1 so it doesn’t get too small or too big
-    scale <- plot_width / 1200 * 0.8  # Slightly reduce legend size
-    max(min(scale, 1), 0.5)
-    #scale
-  })
+    scale <- plot_width / 1200 
+    max(min(scale, 1), 0.5)})
   
-  # Construct final plot
+  #Construct final plot
   final_plot_reactive <- reactive({
     req(input$match_id != "", input$player != "")
     
-    # Set variables from selection from dropdown menu
+    #Set variables from selection from dropdown menu
     player_analysed <- input$player
     match_analysed <- as.numeric(input$match_id)
     
-    # Generate individual plot using functions
+    #Generate individual plot using functions
     events_data <- create_events_plot(player_analysed, match_analysed, match_event_data)
     events_plot <- events_data$plot 
     legend_extracted <- events_data$legend
     
-    # *** UPDATED: Create the legend using the dynamic scale ***
+    #Add legend
     legend_plot <- ggdraw() +
       cowplot::draw_grob(legend_extracted, scale = legend_scale())
     
-    # Use functions to create additional plots and table
+    #Use functions to create additional plots and table
     shot_outcome_plot <- create_shot_outcome_plot(player_analysed, match_analysed, match_event_data)
     heatmap_plot <- create_heatmap(player_analysed, match_analysed, match_event_data)
     stats_table_plot <- create_stats_table_grob(player_analysed, match_analysed, stats_per_match, season_stats)
     
-    # Combine all plots and legend into a single plot
+    #Combine all plots and legend into a single plot
     final_plot <- (events_plot | 
                      (shot_outcome_plot / heatmap_plot / legend_plot) | 
                      stats_table_plot) +
       plot_layout(widths = c(1.4, 1.2, 1),
                   heights = c(1)) +
-      # Add title annotation with player name, match details, and date
+      #Add title annotation with player name, match details, and date
       plot_annotation(title = paste(
         player_analysed, "-",
         (match_data %>% filter(match_id == match_analysed) %>% pull(home_team.home_team_name)),
@@ -825,22 +820,21 @@ server <- function(input, output, session) {
     return(final_plot)
   })
   
-  # Render the final plot
+  #Render the final plot
   output$final_plot <- renderPlot({
     final_plot_reactive() 
   },
-  # Make sure aspect ratio is 3:2
+  #Make sure aspect ratio is 3:2
   width = function() { session$clientData$output_final_plot_width },
   height = function() { session$clientData$output_final_plot_width * 0.667 })
   
-  # Download handler remains unchanged
+  #Download handler remains unchanged
   output$download_plot <- downloadHandler(
     filename = function() { paste("Match_Analysis_", input$player, "_", input$match_id, ".png", sep = "") },
     content = function(file) {
       ggsave(file, plot = final_plot_reactive(), width = 12, height = 8, dpi = 300)
     }
   )
-  
 }
 
 #----Shiny App Launch----
