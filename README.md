@@ -30,5 +30,5 @@ Includes the code that scraps all event data and matches information for the Pre
 This repository contains code to create visualisations, such as shot, pass and heatmaps. These visualisations provide insights into player behaviour, movement patterns, and effectiveness on the pitch, making them useful for performance analysis and scouting.
 
 ## License
-This project uses free StatsBomb data pulled using the Statsbomb API, as shown in the code.
+This project uses free StatsBomb data pulled using the Statsbomb API.
 
